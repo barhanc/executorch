@@ -25,6 +25,9 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from triton.testing import do_bench
 
 from executorch.backends.cuda.triton.kernels.sdpa import sdpa as triton_sdpa
+from executorch.backends.cuda.triton.kernels.sdpa import (
+    sdpa_decode_splitk as triton_splitk,
+)
 
 
 # PyTorch's Flash/Efficient backends don't support GQA (H_q != H_kv) directly.
@@ -50,6 +53,10 @@ def _run_triton(q, k, v, attn_mask, enable_gqa):
     return triton_sdpa(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
 
 
+def _run_splitk(q, k, v, attn_mask, enable_gqa):
+    return triton_splitk(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
+
+
 def _run_pytorch_default(q, k, v, attn_mask, enable_gqa):
     return F.scaled_dot_product_attention(
         q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa,
@@ -72,6 +79,7 @@ def _run_flash(q, k, v, attn_mask, enable_gqa):
 
 BACKENDS = {
     "triton": ("ET Triton (GQA)", _run_triton),
+    "splitk": ("ET Split-K (GQA)", _run_splitk),
     "pytorch": ("PyTorch", _run_pytorch_default),
     "flash": ("Flash (expanded KV)", _run_flash),
     "efficient": ("Efficient (expanded KV)", _make_pytorch_runner(SDPBackend.EFFICIENT_ATTENTION)),
