@@ -154,14 +154,30 @@ bool isQuantizedDataType(const xnn_datatype data_type) {
 Converts dims from uint32 to size_t. Takes in a flatbuffer vector
 of uint32_t and returns a std::vector of size_t. XNNPACK takes in
 dims of size_t* but tensor shape is serialized in flatbuffer as
-int32_t. As a result, we need to static cast the shapes to size_t
+int32_t. As a result, we need to static cast the shapes to size_t.
+Individual dimension values are validated to prevent unbounded memory
+allocation from malicious inputs.
 */
+constexpr uint32_t kMaxDimensionValue = 1 << 24; // 16M per dimension
+
 template <typename T = size_t>
-std::vector<T> flatbufferDimsToVector(
+Result<std::vector<T>> flatbufferDimsToVector(
     const flatbuffers::Vector<uint32_t>* fb_dims) {
+  if (fb_dims == nullptr) {
+    ET_LOG(Error, "flatbufferDimsToVector: dims vector is null");
+    return Error::InvalidProgram;
+  }
   std::vector<T> dims_data;
   dims_data.reserve(fb_dims->size());
   for (auto fb_dim : *fb_dims) {
+    if (fb_dim > kMaxDimensionValue) {
+      ET_LOG(
+          Error,
+          "Dimension value %u exceeds maximum allowed %u",
+          fb_dim,
+          kMaxDimensionValue);
+      return Error::InvalidProgram;
+    }
     dims_data.push_back(static_cast<T>(fb_dim));
   }
   return dims_data;
@@ -289,9 +305,25 @@ Error defineTensor(
       Internal,
       "Deserialized Tensor is Null, this should never happen");
 
+  ET_CHECK_OR_RETURN_ERROR(
+      tensor_value->dims() != nullptr,
+      InvalidProgram,
+      "Tensor value has null dims array");
+
+  ET_CHECK_OR_RETURN_ERROR(
+      tensor_value->num_dims() == tensor_value->dims()->size(),
+      InvalidProgram,
+      "Tensor num_dims %u does not match dims array size %u",
+      tensor_value->num_dims(),
+      tensor_value->dims()->size());
+
   // Get tensor dims, here we need to use a vector in order
   // to properly convert the uint32_t* to size_t*
-  std::vector<size_t> dims_data = flatbufferDimsToVector(tensor_value->dims());
+  auto dims_result = flatbufferDimsToVector(tensor_value->dims());
+  if (!dims_result.ok()) {
+    return dims_result.error();
+  }
+  std::vector<size_t> dims_data = std::move(dims_result.get());
 
   // XNNPACK Id
   uint32_t id = XNN_INVALID_VALUE_ID;
@@ -966,7 +998,12 @@ Error defineStaticTransposeNode(
   auto graph_node = node->xnode_union_as_XNNStaticTranspose();
 
   // Get tensor dims, we need to convert the uint32_t* to size_t*
-  std::vector<size_t> dims_data = flatbufferDimsToVector(graph_node->perm());
+  auto dims_result = flatbufferDimsToVector(graph_node->perm());
+  if (!dims_result.ok()) {
+    return dims_result.error();
+  }
+  std::vector<size_t> dims_data = std::move(dims_result.get());
+
   xnn_status status = xnn_define_static_transpose(
       subgraph_ptr,
       graph_node->num_dims(),
@@ -1031,10 +1068,16 @@ Error defineStaticConstantPadNode(
   const fb_xnnpack::XNNStaticConstantPad* graph_node =
       node->xnode_union_as_XNNStaticConstantPad();
 
-  std::vector<size_t> pre_paddings_dims =
-      flatbufferDimsToVector(graph_node->pre_paddings());
-  std::vector<size_t> post_paddings_dims =
-      flatbufferDimsToVector(graph_node->post_paddings());
+  auto pre_result = flatbufferDimsToVector(graph_node->pre_paddings());
+  if (!pre_result.ok()) {
+    return pre_result.error();
+  }
+  std::vector<size_t> pre_paddings_dims = std::move(pre_result.get());
+  auto post_result = flatbufferDimsToVector(graph_node->post_paddings());
+  if (!post_result.ok()) {
+    return post_result.error();
+  }
+  std::vector<size_t> post_paddings_dims = std::move(post_result.get());
 
   xnn_status status = xnn_define_static_constant_pad(
       subgraph_ptr,
@@ -1111,8 +1154,12 @@ Error defineStaticReshapeNode(
   auto graph_node = node->xnode_union_as_XNNStaticReshape();
 
   // Get tensor dims, we need to convert the uint32_t* to size_t*
-  std::vector<size_t> dims_data =
-      flatbufferDimsToVector(graph_node->new_shape());
+  auto dims_result = flatbufferDimsToVector(graph_node->new_shape());
+  if (!dims_result.ok()) {
+    return dims_result.error();
+  }
+  std::vector<size_t> dims_data = std::move(dims_result.get());
+
   xnn_status status = xnn_define_static_reshape(
       subgraph_ptr,
       graph_node->num_dims(),
@@ -1406,8 +1453,16 @@ Error defineStaticSliceNode(
 
   auto graph_node = node->xnode_union_as_XNNStaticSlice();
 
-  std::vector<size_t> offsets = flatbufferDimsToVector(graph_node->offsets());
-  std::vector<size_t> sizes = flatbufferDimsToVector(graph_node->sizes());
+  auto offsets_result = flatbufferDimsToVector(graph_node->offsets());
+  if (!offsets_result.ok()) {
+    return offsets_result.error();
+  }
+  std::vector<size_t> offsets = std::move(offsets_result.get());
+  auto sizes_result = flatbufferDimsToVector(graph_node->sizes());
+  if (!sizes_result.ok()) {
+    return sizes_result.error();
+  }
+  std::vector<size_t> sizes = std::move(sizes_result.get());
 
   xnn_status status = xnn_define_static_slice(
       subgraph_ptr,
