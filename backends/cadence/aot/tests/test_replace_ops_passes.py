@@ -37,7 +37,6 @@ from executorch.backends.cadence.aot.replace_ops import (
     ReplaceMulTensorWithMulAndFullOpsPass,
     ReplaceNopTransposeOrPermuteWithViewPass,
     ReplacePadWithCatPass,
-    ReplacePermuteWithTransposePass,
     ReplacePowWithMulPass,
     ReplaceRepeatWithCatPass,
     ReplaceScalarTensorWithFullPass,
@@ -965,10 +964,7 @@ class TestReplaceOpsPasses(unittest.TestCase):
         builder.output([mm])
         original_gm = builder.get_graph_module()
 
-        gm = cast(
-            PassResult, ReplacePermuteWithTransposePass()(original_gm)
-        ).graph_module
-        gm = cast(PassResult, ReplaceMMWithAddMMPass()(gm)).graph_module
+        gm = cast(PassResult, ReplaceMMWithAddMMPass()(original_gm)).graph_module
 
         gm_before_linear = copy.deepcopy(gm)
         pass_result = cast(PassResult, ReplaceAddMMWithLinearPass()(gm))
@@ -1029,12 +1025,8 @@ class TestReplaceOpsPasses(unittest.TestCase):
         builder.output([addmm])
         original_gm = builder.get_graph_module()
 
-        gm = cast(
-            PassResult, ReplacePermuteWithTransposePass()(original_gm)
-        ).graph_module
-
-        gm_before_linear = copy.deepcopy(gm)
-        pass_result = cast(PassResult, ReplaceAddMMWithLinearPass()(gm))
+        gm_before_linear = copy.deepcopy(original_gm)
+        pass_result = cast(PassResult, ReplaceAddMMWithLinearPass()(original_gm))
         self.assertTrue(pass_result.modified)
         graph_after_passes = pass_result.graph_module
 
@@ -1077,11 +1069,7 @@ class TestReplaceOpsPasses(unittest.TestCase):
         builder.output([addmm])
         original_gm = builder.get_graph_module()
 
-        gm = cast(
-            PassResult, ReplacePermuteWithTransposePass()(original_gm)
-        ).graph_module
-
-        pass_result = cast(PassResult, ReplaceAddMMWithLinearPass()(gm))
+        pass_result = cast(PassResult, ReplaceAddMMWithLinearPass()(original_gm))
         self.assertFalse(pass_result.modified)
 
     @torch.no_grad()
@@ -1713,63 +1701,6 @@ class TestReplaceOpsPasses(unittest.TestCase):
         )
         self.assertEqual(
             count_node(graph_after_passes, exir_ops.edge.aten.view_copy.default), 1
-        )
-
-    @expand(
-        [
-            # permutations replaced by transpose
-            [(3, 4), (1, 0)],
-            [(3, 4, 6), (0, 2, 1)],
-        ]
-    )
-    @torch.no_grad()
-    def test_replace_permute_with_transpose(
-        self, shape: Tuple[int], dims: Tuple[int]
-    ) -> None:
-        x = torch.randn(shape)
-        original_gm = single_op_builder(
-            placeholders=(x,),
-            op=exir_ops.edge.aten.permute_copy.default,
-            args=(x, dims),
-        )
-
-        gm_before = copy.deepcopy(original_gm)
-        p = ReplacePermuteWithTransposePass()
-        result = cast(PassResult, p(original_gm))
-        self.assertTrue(result.modified)
-        graph_after_passes = result.graph_module
-        inputs = [x]
-        validate(
-            gm_before, graph_after_passes, inputs, "ReplacePermuteWithTransposePass"
-        )
-
-        # Assert that permute op was replaced by a transpose op
-        self.assertEqual(
-            count_node(graph_after_passes, exir_ops.edge.aten.permute_copy.default), 0
-        )
-        self.assertEqual(
-            count_node(graph_after_passes, exir_ops.edge.aten.transpose_copy.int), 1
-        )
-
-    @torch.no_grad()
-    def test_replace_permute_with_transpose_nop(
-        self,
-    ) -> None:
-        x = torch.randn(3, 4)
-        original_gm = single_op_builder(
-            placeholders=(x,),
-            op=exir_ops.edge.aten.permute_copy.default,
-            args=(x, [0, 1]),
-        )
-        p = ReplacePermuteWithTransposePass()
-        graph_after_passes = cast(PassResult, p(original_gm)).graph_module
-
-        # Assert that permute op was replaced by a transpose op
-        self.assertEqual(
-            count_node(graph_after_passes, exir_ops.edge.aten.permute_copy.default), 0
-        )
-        self.assertEqual(
-            count_node(graph_after_passes, exir_ops.edge.aten.transpose_copy.int), 0
         )
 
 
