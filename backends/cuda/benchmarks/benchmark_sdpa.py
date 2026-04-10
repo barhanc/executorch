@@ -21,13 +21,13 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
-from triton.testing import do_bench
 
-from executorch.backends.cuda.triton.kernels.sdpa import sdpa as triton_sdpa
 from executorch.backends.cuda.triton.kernels.sdpa import (
+    sdpa as triton_sdpa,
     sdpa_decode_splitk as triton_splitk,
 )
+from torch.nn.attention import sdpa_kernel, SDPBackend
+from triton.testing import do_bench
 
 
 # PyTorch's Flash/Efficient backends don't support GQA (H_q != H_kv) directly.
@@ -59,7 +59,11 @@ def _run_splitk(q, k, v, attn_mask, enable_gqa):
 
 def _run_pytorch_default(q, k, v, attn_mask, enable_gqa):
     return F.scaled_dot_product_attention(
-        q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa,
+        q,
+        k,
+        v,
+        attn_mask=attn_mask,
+        enable_gqa=enable_gqa,
     )
 
 
@@ -67,6 +71,7 @@ def _make_pytorch_runner(backend: SDPBackend):
     def run(q, k, v, attn_mask, enable_gqa):
         with sdpa_kernel(backend):
             return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+
     return run
 
 
@@ -82,7 +87,10 @@ BACKENDS = {
     "splitk": ("ET Split-K (GQA)", _run_splitk),
     "pytorch": ("PyTorch", _run_pytorch_default),
     "flash": ("Flash (expanded KV)", _run_flash),
-    "efficient": ("Efficient (expanded KV)", _make_pytorch_runner(SDPBackend.EFFICIENT_ATTENTION)),
+    "efficient": (
+        "Efficient (expanded KV)",
+        _make_pytorch_runner(SDPBackend.EFFICIENT_ATTENTION),
+    ),
     "math": ("Math (expanded KV)", _make_pytorch_runner(SDPBackend.MATH)),
 }
 
@@ -112,6 +120,7 @@ SCENARIOS = {
 
 # -- Helpers -----------------------------------------------------------------
 
+
 def _make_tensors(B, H_q, H_kv, Lq, Lk, D, device="cuda", dtype=torch.bfloat16):
     q = torch.randn(B, H_q, Lq, D, device=device, dtype=dtype)
     k = torch.randn(B, H_kv, Lk, D, device=device, dtype=dtype)
@@ -127,6 +136,10 @@ def _make_tensors(B, H_q, H_kv, Lq, Lk, D, device="cuda", dtype=torch.bfloat16):
 
 def _max_abs_error(out, ref):
     return (out.float() - ref.float()).abs().max().item()
+
+
+# Cross-backend validation tolerance (bf16 vs bf16).
+MAX_ABS_TOL = 1e-2
 
 
 def _bench_us(fn, num_warmup, num_iters):
@@ -154,6 +167,7 @@ def _try_bench(run_fn, q, k, v, mask, enable_gqa, num_warmup, num_iters):
 
 
 # -- Main --------------------------------------------------------------------
+
 
 def _shape_label(shape):
     return (
@@ -231,7 +245,7 @@ def run_benchmark(
                     if name == ref_name or outputs[name] is None:
                         continue
                     err = _max_abs_error(outputs[name], ref_out)
-                    assert err < 1e-2, (
+                    assert err < MAX_ABS_TOL, (
                         f"Output mismatch for {_shape_label(shape)}: "
                         f"{label} vs {BACKENDS[ref_name][0]}, "
                         f"max abs error {err:.3e} >= 1e-2"
@@ -245,7 +259,9 @@ def run_benchmark(
                     bk, bv, bmask = k_exp, v_exp, mask_exp
                 else:
                     bk, bv, bmask = k, v, mask
-                times[name] = _try_bench(run_fn, q, bk, bv, bmask, enable_gqa, num_warmup, num_iters)
+                times[name] = _try_bench(
+                    run_fn, q, bk, bv, bmask, enable_gqa, num_warmup, num_iters
+                )
 
         # Format row using col_widths
         ci = 0
@@ -266,7 +282,9 @@ def run_benchmark(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark Triton SDPA vs PyTorch backends")
+    parser = argparse.ArgumentParser(
+        description="Benchmark Triton SDPA vs PyTorch backends"
+    )
     parser.add_argument(
         "--scenario",
         choices=list(SCENARIOS.keys()) + ["all"],

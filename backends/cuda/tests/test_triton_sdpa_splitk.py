@@ -62,6 +62,11 @@ def _max_abs_error(out, ref):
     return (out.float() - ref.float()).abs().max().item()
 
 
+# bf16 kernel vs fp32 reference tolerance.
+# Matches benchmark cross-validation and test_triton_sdpa.py.
+MAX_ABS_TOL = 1e-2
+
+
 HEAD_DIMS_POW2 = [64, 128, 256]
 
 GQA_CONFIGS = [
@@ -90,7 +95,9 @@ class TestTritonSdpaSplitK(unittest.TestCase):
     def test_decode_basic(self):
         """GQA decode across head configs, head dims, and KV lengths."""
         for (H_q, H_kv, label), D, Lk in itertools.product(
-            GQA_CONFIGS, HEAD_DIMS_POW2, LK_LENGTHS,
+            GQA_CONFIGS,
+            HEAD_DIMS_POW2,
+            LK_LENGTHS,
         ):
             with self.subTest(label=label, D=D, Lk=Lk):
                 B, Lq = 1, 1
@@ -105,7 +112,8 @@ class TestTritonSdpaSplitK(unittest.TestCase):
                 self.assertEqual(out.shape, (B, H_q, Lq, D))
                 self.assertFalse(torch.isnan(out).any(), "NaN in output")
                 self.assertLess(
-                    _max_abs_error(out, ref), 0.05,
+                    _max_abs_error(out, ref),
+                    0.05,
                     f"{label} D={D} Lk={Lk}",
                 )
 
@@ -126,7 +134,7 @@ class TestTritonSdpaSplitK(unittest.TestCase):
                 ref = _reference_sdpa(q, k, v, attn_mask=mask)
 
                 self.assertFalse(torch.isnan(out).any())
-                self.assertLess(_max_abs_error(out, ref), 0.05)
+                self.assertLess(_max_abs_error(out, ref), MAX_ABS_TOL)
 
     def test_decode_mha(self):
         """MHA (H_q==H_kv, num_groups=1) should work with split-K."""
@@ -142,7 +150,7 @@ class TestTritonSdpaSplitK(unittest.TestCase):
                 ref = _reference_sdpa(q, k, v)
 
                 self.assertFalse(torch.isnan(out).any())
-                self.assertLess(_max_abs_error(out, ref), 0.05)
+                self.assertLess(_max_abs_error(out, ref), MAX_ABS_TOL)
 
     def test_qwen35_config(self):
         """Exact Qwen3.5 MoE config: H_q=16, H_kv=2, D=256."""
@@ -162,7 +170,7 @@ class TestTritonSdpaSplitK(unittest.TestCase):
 
                 self.assertEqual(out.shape, (B, H_q, Lq, D))
                 self.assertFalse(torch.isnan(out).any())
-                self.assertLess(_max_abs_error(out, ref), 0.05)
+                self.assertLess(_max_abs_error(out, ref), MAX_ABS_TOL)
 
     def test_custom_scale(self):
         """Non-default attention scale."""
@@ -177,7 +185,7 @@ class TestTritonSdpaSplitK(unittest.TestCase):
         ref = _reference_sdpa(q, k, v, scale=scale)
 
         self.assertFalse(torch.isnan(out).any())
-        self.assertLess(_max_abs_error(out, ref), 0.05)
+        self.assertLess(_max_abs_error(out, ref), MAX_ABS_TOL)
 
     def test_cross_validate_with_sdpa(self):
         """Split-K output matches tiled sdpa output for decode shapes."""
@@ -195,7 +203,8 @@ class TestTritonSdpaSplitK(unittest.TestCase):
                 out_tiled = self.sdpa(q, k, v, attn_mask=mask, enable_gqa=True)
 
                 self.assertLess(
-                    _max_abs_error(out_splitk, out_tiled), 0.05,
+                    _max_abs_error(out_splitk, out_tiled),
+                    MAX_ABS_TOL,
                     f"Split-K vs tiled mismatch at Lk={Lk}",
                 )
 
@@ -229,7 +238,7 @@ class TestTritonSdpaSplitK(unittest.TestCase):
         ref = _reference_sdpa(q, k, v)
 
         self.assertFalse(torch.isnan(out).any())
-        self.assertLess(_max_abs_error(out, ref), 0.05)
+        self.assertLess(_max_abs_error(out, ref), MAX_ABS_TOL)
 
     def test_batch_size(self):
         """Batch size > 1."""
@@ -245,7 +254,7 @@ class TestTritonSdpaSplitK(unittest.TestCase):
                 ref = _reference_sdpa(q, k, v)
 
                 self.assertFalse(torch.isnan(out).any())
-                self.assertLess(_max_abs_error(out, ref), 0.05)
+                self.assertLess(_max_abs_error(out, ref), MAX_ABS_TOL)
 
     # ------------------------------------------------------------------
     # Validation errors
