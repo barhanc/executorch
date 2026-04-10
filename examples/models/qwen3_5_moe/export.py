@@ -380,14 +380,20 @@ def _apply_turboquant(model, config):
 # ---------------------------------------------------------------------------
 
 
+def _set_batched_moe(model, enabled):
+    """Toggle batched tensor-core MoE kernel for all MoE layers."""
+    for layer in model.layers:
+        if hasattr(layer, "mlp") and hasattr(layer.mlp, "experts"):
+            layer.mlp.experts.use_batched_moe = enabled
+
+
 def export_and_lower(model, config, args):
     """Export model to .pte via torch.export + CUDA backend.
 
     Exports two methods:
-      - "decode": decode path (T=1), uses native PyTorch recurrent FLA
-        so AOTI can fuse with surrounding ops for maximum decode throughput.
-      - "prefill": prefill path (T>=2), uses chunked FLA triton_op with
-        dynamic sequence length.
+      - "decode": decode path (T=1), vec-mat MoE kernel via fused_moe.
+      - "prefill": prefill path (T>=2), batched tensor-core MoE kernel
+        via fused_moe_batched_gemm, with dynamic sequence length.
 
     Both methods share mutable state buffers (KV cache, conv_state,
     recurrent_state) via share_mutable_buffers=True. The model uses
@@ -412,7 +418,8 @@ def export_and_lower(model, config, args):
     # -O0 compiles ~8x faster than -O1 with no measurable runtime impact.
     inductor_config.aot_inductor.compile_wrapper_opt_level = "O0"
 
-    # --- Decode method (T=1, static shape) ---
+    # --- Decode method (T=1, static shape, vec-mat MoE kernel) ---
+    _set_batched_moe(model, False)
     print("Exporting decode method...")
     decode_tokens = torch.tensor([[0]], dtype=torch.long)
     decode_pos = torch.tensor([0], dtype=torch.long)
@@ -424,10 +431,14 @@ def export_and_lower(model, config, args):
         )
     print("Decode export successful!")
 
-    # --- Prefill method (T>=2, dynamic shape) ---
+    # --- Prefill method (T>=2, dynamic shape, batched tensor-core MoE kernel) ---
+    # Example T must equal max_seq_len-1 so AOTI compiles kernels for the
+    # full range of sequence lengths.
+    _set_batched_moe(model, True)
     print("Exporting prefill method...")
-    prefill_tokens = torch.tensor([[0, 1]], dtype=torch.long)
-    prefill_pos = torch.tensor([0, 1], dtype=torch.long)
+    example_seq_len = config.max_seq_len - 1
+    prefill_tokens = torch.zeros((1, example_seq_len), dtype=torch.long)
+    prefill_pos = torch.arange(example_seq_len, dtype=torch.long)
     seq_dim = Dim("seq_len", min=2, max=config.max_seq_len - 1)
     prefill_dynamic_shapes = (
         {1: seq_dim},  # tokens
