@@ -30,6 +30,7 @@ from executorch.backends.cuda.cuda_backend import CudaBackend
 from executorch.backends.cuda.cuda_partitioner import CudaPartitioner
 from executorch.backends.cuda.triton.kernels.fused_moe import (
     fused_moe as triton_fused_moe,
+    fused_moe_batched as triton_fused_moe_batched,
 )
 from executorch.exir import (
     EdgeCompileConfig,
@@ -331,6 +332,75 @@ class TestFusedMoE(unittest.TestCase):
             diff = (out[t].float() - ref.float()).abs().max().item()
             rel = diff / (ref.float().abs().max().item() + 1e-10)
             self.assertLess(rel, 0.05, f"token {t}: relative diff {rel:.4f}")
+
+    def test_batched_correctness(self):
+        """Batched kernel matches reference across M values."""
+        test_cases = [
+            (42, 8, 64, 32, 4, 2, 32, "8tok_small"),
+            (7, 16, 64, 32, 8, 4, 32, "16tok_8exp_top4"),
+            (13, 32, 128, 64, 8, 2, 64, "32tok_gs64"),
+            (55, 64, 64, 32, 4, 2, 32, "64tok"),
+            (99, 128, 128, 64, 8, 2, 32, "128tok"),
+        ]
+        for seed, M, hidden, intermediate, num_experts, top_k, gs, desc in test_cases:
+            with self.subTest(desc=desc):
+                torch.manual_seed(seed)
+                x = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda")
+                w1_weight = torch.randn(
+                    num_experts, 2 * intermediate, hidden,
+                    dtype=torch.bfloat16, device="cuda",
+                )
+                w2_weight = torch.randn(
+                    num_experts, hidden, intermediate,
+                    dtype=torch.bfloat16, device="cuda",
+                )
+                w1, w1s = _quantize_weights_int4(w1_weight.cpu(), gs)
+                w2, w2s = _quantize_weights_int4(w2_weight.cpu(), gs)
+                w1, w1s, w2, w2s = w1.cuda(), w1s.cuda(), w2.cuda(), w2s.cuda()
+
+                scores = torch.randn(M, num_experts, device="cuda")
+                topk_weights, topk_ids = torch.topk(scores, top_k, dim=-1)
+                topk_weights = topk_weights.softmax(dim=-1).float()
+
+                out = triton_fused_moe_batched(
+                    x, w1, w1s, w2, w2s, topk_weights, topk_ids,
+                    top_k, num_experts, gs,
+                )
+
+                w1_dq = _dequantize_int4(w1.cpu(), w1s.cpu(), gs).cuda()
+                w2_dq = _dequantize_int4(w2.cpu(), w2s.cpu(), gs).cuda()
+                ref = _reference_moe(x, w1_dq, w2_dq, topk_weights, topk_ids, top_k)
+
+                diff = (out.float() - ref.float()).abs().max().item()
+                rel = diff / (ref.float().abs().max().item() + 1e-10)
+                self.assertLess(
+                    rel, 0.05, f"{desc}: relative diff {rel:.4f} (abs {diff:.6f})",
+                )
+
+    def test_batched_matches_fused(self):
+        """Batched kernel matches the existing fused_moe kernel at Qwen-scale dims."""
+        E, top_k, K, inter, gs = 256, 8, 2048, 512, 128
+        torch.manual_seed(42)
+        vals = torch.randint(0, 16, (E, 2 * inter, K), dtype=torch.uint8, device="cuda")
+        w1 = ((vals[:, :, 1::2] << 4) | vals[:, :, 0::2]).to(torch.int8)
+        w1s = torch.randn(E, 2 * inter, K // gs, device="cuda", dtype=torch.bfloat16) * 0.01
+        vals = torch.randint(0, 16, (E, K, inter), dtype=torch.uint8, device="cuda")
+        w2 = ((vals[:, :, 1::2] << 4) | vals[:, :, 0::2]).to(torch.int8)
+        w2s = torch.randn(E, K, inter // gs, device="cuda", dtype=torch.bfloat16) * 0.01
+
+        for M in [16, 64, 256]:
+            with self.subTest(M=M):
+                x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+                logits = torch.randn(M, E, device="cuda", dtype=torch.float32)
+                tw, ti = torch.topk(logits, top_k, dim=-1)
+                tw = tw.softmax(dim=-1)
+                ti = ti.to(torch.int64)
+
+                out_fused = triton_fused_moe(x, w1, w1s, w2, w2s, tw, ti, top_k, E, gs)
+                out_batched = triton_fused_moe_batched(x, w1, w1s, w2, w2s, tw, ti, top_k, E, gs)
+
+                err = (out_fused.float() - out_batched.float()).abs().max().item()
+                self.assertLess(err, 0.5, f"M={M}: max abs error {err:.4e}")
 
     def test_export_cuda(self):
         """Export succeeds and produces non-empty .pte."""
