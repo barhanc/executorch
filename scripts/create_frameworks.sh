@@ -163,13 +163,13 @@ create_xcframework() {
         done
     fi
 
-    echo -e "\nDeleting intermediate libraries:"
-    for merged_lib in "${merged_libs[@]}"; do
-        if [[ -f "${merged_lib}" ]]; then
-            echo "Deleting ${merged_lib}"
-            rm "${merged_lib}"
-        fi
-    done
+    # echo -e "\nDeleting intermediate libraries:"
+    # for merged_lib in "${merged_libs[@]}"; do
+    #     if [[ -f "${merged_lib}" ]]; then
+    #         echo "Deleting ${merged_lib}"
+    #         rm "${merged_lib}"
+    #     fi
+    # done
 }
 
 # Create an XCFramework for each target library.
