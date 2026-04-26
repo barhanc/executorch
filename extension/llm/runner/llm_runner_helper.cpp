@@ -323,7 +323,10 @@ std::unique_ptr<MultimodalRunner> create_multimodal_runner(
       module.get(),
       text_decoder_runner.get(),
       tokenizer.get(),
-      io_manager.get());
+      io_manager.get(),
+      metadata.at(kUseKVCache),
+      metadata.at(kEnableDynamicShape),
+      metadata.at(kMaxSeqLen));
 
   // Create text_token_generator with stats
   auto stats = std::make_unique<Stats>();

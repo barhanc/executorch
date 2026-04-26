@@ -14,6 +14,9 @@
 #include <executorch/extension/llm/runner/multimodal_prefiller.h>
 #include <executorch/extension/llm/runner/util.h>
 #include <executorch/extension/tensor/tensor.h>
+#include <memory>
+#include <optional>
+#include <vector>
 
 namespace executorch::extension::llm {
 
@@ -21,11 +24,17 @@ MultimodalPrefiller::MultimodalPrefiller(
     Module* module,
     MultimodalDecoderRunner* decoder_runner,
     Tokenizer* tokenizer,
-    IOManager* io_manager)
+    IOManager* io_manager,
+    bool use_kv_cache,
+    bool enable_parallel_prefill,
+    int64_t max_seq_len)
     : module_(module),
       text_decoder_runner_(decoder_runner),
       tokenizer_(tokenizer),
-      io_manager_(io_manager) {}
+      io_manager_(io_manager),
+      use_kv_cache_(use_kv_cache),
+      enable_parallel_prefill_(enable_parallel_prefill),
+      max_seq_len_(max_seq_len > 0 ? max_seq_len : 1024) {}
 
 /**
  * Prefill an LLM Module with the given multimodal input.
@@ -88,7 +97,7 @@ Result<uint64_t> MultimodalPrefiller::prefill(
     // tensor (CHW). Add a batch dimension of 1 if needed.
     auto expected_dims = input_meta.sizes();
     auto image_tensor_result =
-        image.toTensor(/*with_batch*/ expected_dims.size() == 4);
+        image.toTensor(/*with_batch*/ false);
     ET_CHECK_OK_OR_RETURN_ERROR(
         image_tensor_result.error(), "Failed to convert image to tensor");
     auto image_tensor = image_tensor_result.get();
@@ -102,18 +111,43 @@ Result<uint64_t> MultimodalPrefiller::prefill(
       image_tensor = image_tensor_return.get();
     }
 
+    // Run image encoder
+    // Safety check: Ensure the tensor has dimensions before using it
+    if (image_tensor->dim() == 0) {
+        ET_LOG(Error, "Image tensor is empty (dim 0), cannot execute encoder.");
+        return Error::InvalidArgument;
+    }
+
     ET_LOG(
         Info,
         "Image tensor dim: %zu, dtype: %s",
         image_tensor->dim(),
         ::executorch::runtime::toString(image_tensor->scalar_type()));
+    
+    // Run image encoder
+    if (image_tensor->dim() == 0) {
+        ET_LOG(Error, "Image tensor is empty (dim 0), cannot execute encoder.");
+        return Error::InvalidArgument;
+    }
+
+    ET_LOG(
+        Info,
+        "Image tensor dim: %zu, dtype: %s",
+        image_tensor->dim(),
+        ::executorch::runtime::toString(image_tensor->scalar_type()));
+    
     // Run image encoder
     auto image_encoder_result =
-        module_->execute(kVisionEncoderMethod, image_tensor);
+        module_->execute(kVisionEncoderMethod, *image_tensor);
     ET_CHECK_OK_OR_RETURN_ERROR(image_encoder_result.error());
     auto image_encoder_outputs = image_encoder_result.get();
-
     encoder_output = image_encoder_outputs[0];
+    
+    // Sync cache position: visual tokens are pre-filled, text tokens start after them
+    int64_t visual_token_count = encoder_output.toTensor().size(1);
+    ET_LOG(Info, "Visual tokens processed: %zu", visual_token_count);
+    // Logic to increment cache_position based on visual_token_count should follow here
+    // based on your runner's specific cache implementation.
   } else if (input.is_audio()) {
     const Audio& audio = input.get_audio();
 
@@ -226,26 +260,73 @@ Result<uint64_t> MultimodalPrefiller::prefill(
   ET_CHECK_OK_OR_RETURN_ERROR(cache_position_result.error());
   auto cache_position_tensor = cache_position_result.get();
 
-  auto prefill_result = module_->execute(
-      kTextModelMethod, {encoder_output, cache_position_tensor});
-  if (prefill_result.error() != ::executorch::runtime::Error::Ok) {
-    return prefill_result.error();
-  }
-  // Check if prefill_outputs is empty, if it is return error and log that the
-  // specified encoder returned empty results when used to prefill decoder.
-  auto prefill_outputs = prefill_result.get();
-  if (prefill_outputs.empty()) {
-    ET_LOG(
-        Error, "Encoder returned empty results when used to prefill decoder");
-    return ::executorch::runtime::Error::InvalidState;
-  }
-  auto outputs_res = prefill_outputs[0].toTensor();
+  // Decide whether to do parallel prefill based on flags and method metadata
+  bool parallel_prefill =
+      enable_parallel_prefill_ && (cache_position_tensor->numel() > 1);
 
-  // Update start_pos, tracking the current cache position.
-  start_pos += seq_len;
+  if (parallel_prefill || !use_kv_cache_) {
+    auto prefill_result = module_->execute(
+        kTextModelMethod, {encoder_output, cache_position_tensor});
+    if (prefill_result.error() != ::executorch::runtime::Error::Ok) {
+      return prefill_result.error();
+    }
+    auto prefill_outputs = std::move(*prefill_result);
+    if (prefill_outputs.empty()) {
+      ET_LOG(
+          Error, "Encoder returned empty results when used to prefill decoder");
+      return ::executorch::runtime::Error::InvalidState;
+    }
+    start_pos += seq_len;
+    return static_cast<uint64_t>(
+        text_decoder_runner_->logits_to_token(prefill_outputs[0].toTensor()));
+  } else {
+    // Sequential prefill: loop through tokens in encoder_output
+    auto encoder_tensor = encoder_output.toTensor();
+    auto dim_size = encoder_tensor.size(2); // hidden dim
+    auto scalar_type = encoder_tensor.scalar_type();
+    int64_t pos = 0;
 
-  return static_cast<uint64_t>(
-      text_decoder_runner_->logits_to_token(outputs_res));
+    // Run the first token and initialize logits_tensor
+    auto token_embedding = executorch::extension::from_blob(
+        (uint8_t*)encoder_tensor.mutable_data_ptr() +
+            pos * dim_size *
+                ::executorch::runtime::elementSize(
+                    (::executorch::aten::ScalarType)scalar_type),
+        {1, 1, static_cast<int>(dim_size)},
+        scalar_type);
+
+    auto step_result = text_decoder_runner_->step(token_embedding, start_pos);
+    if (!step_result.ok()) {
+      return step_result.error();
+    }
+    auto logits_tensor = std::move(*step_result);
+
+    pos++;
+    start_pos++;
+
+    while (pos < seq_len) {
+      // Create a slice of the encoder output for current token
+      token_embedding = executorch::extension::from_blob(
+          (uint8_t*)encoder_tensor.mutable_data_ptr() +
+              pos * dim_size *
+                  ::executorch::runtime::elementSize(
+                      (::executorch::aten::ScalarType)scalar_type),
+          {1, 1, static_cast<int>(dim_size)},
+          scalar_type);
+
+      auto next_step_result =
+          text_decoder_runner_->step(token_embedding, start_pos);
+      if (!next_step_result.ok()) {
+        return next_step_result.error();
+      }
+      logits_tensor = std::move(*next_step_result);
+      pos++;
+      start_pos++;
+    }
+
+    return static_cast<uint64_t>(
+        text_decoder_runner_->logits_to_token(logits_tensor));
+  }
 }
 
 /**

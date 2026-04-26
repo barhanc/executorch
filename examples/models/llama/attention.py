@@ -668,15 +668,8 @@ class AttentionGatedDeltaNet(Attention):
         scale = 1.0 / (query.shape[-1] ** 0.5)
         query = query * scale
 
-        core_attn_out = torch.zeros(
-            batch_size,
-            num_heads,
-            sequence_length,
-            v_head_dim,
-            device=value.device,
-            dtype=value.dtype,
-        )
         last_recurrent_state = self.recurrent_state[:batch_size].to(value.dtype)
+        core_attn_out_list = []
 
         for i in range(sequence_length):
             q_t = query[:, :, i]
@@ -691,9 +684,10 @@ class AttentionGatedDeltaNet(Attention):
             last_recurrent_state = last_recurrent_state + k_t.unsqueeze(
                 -1
             ) * delta.unsqueeze(-2)
-            core_attn_out[:, :, i] = (last_recurrent_state * q_t.unsqueeze(-1)).sum(
-                dim=-2
-            )
+            out_t = (last_recurrent_state * q_t.unsqueeze(-1)).sum(dim=-2)
+            core_attn_out_list.append(out_t)
+
+        core_attn_out = torch.stack(core_attn_out_list, dim=2)
 
         with torch.no_grad():
             self.recurrent_state[:batch_size].copy_(

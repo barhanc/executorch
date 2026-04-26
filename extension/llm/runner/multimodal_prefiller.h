@@ -33,7 +33,10 @@ class ET_EXPERIMENTAL MultimodalPrefiller {
       Module* module,
       MultimodalDecoderRunner* decoder_runner,
       Tokenizer* tokenizer,
-      IOManager* io_manager);
+      IOManager* io_manager,
+      bool use_kv_cache = true,
+      bool enable_parallel_prefill = true,
+      int64_t max_seq_len = 0);
 
   /**
    * Prefill an LLM Module with the given multimodal input.
@@ -58,6 +61,9 @@ class ET_EXPERIMENTAL MultimodalPrefiller {
   MultimodalDecoderRunner* text_decoder_runner_;
   Tokenizer* tokenizer_;
   IOManager* io_manager_;
+  bool use_kv_cache_;
+  bool enable_parallel_prefill_;
+  int64_t max_seq_len_;
 };
 
 } // namespace executorch::extension::llm
