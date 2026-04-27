@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 
 def main():
     # 1. Paths
-    pte_path = "qwen3_5_v.pte"
+    pte_path = "qwen3_5_v_quant.pte"
     tokenizer_path = "tokenizer.json"
     model_id = "Qwen/Qwen3.5-0.8B"
     
@@ -28,7 +28,7 @@ def main():
         return
 
     # 3. Prepare Image
-    image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+    image_url = "https://raw.githubusercontent.com/AtharvaTaras/Cat-Images-Dataset/refs/heads/master/cute%20cat/Image_10.jpg"
     print(f"Downloading image from {image_url}...")
     image = Image.open(requests.get(image_url, stream=True).raw).convert("RGB")
     resized_image = image.resize((512, 512))
@@ -61,7 +61,7 @@ def main():
     # # If the runner doesn't loop over image tokens, this will fail.
     inputs.append(make_image_input(pixel_tensor))
     
-    inputs.extend(string_to_inputs("<|vision_end|>Describe this image.<|im_end|>\n<|im_start|>assistant\n"))
+    inputs.extend(string_to_inputs("<|vision_end|>Describe this image in details. What things can you see? List them.<|im_end|>\n<|im_start|>assistant\n"))
     
     # 4. Configure generation
     config = GenerationConfig(

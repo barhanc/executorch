@@ -163,7 +163,7 @@ class SimpleVisionWrapper(nn.Module):
         grid_thw = torch.tensor([[1, grid_h, grid_w]], dtype=torch.int64)
 
         out = self.visual(x, grid_thw)
-        return out.pooler_output[-1, :].view(1, 1, 1024)
+        return out.pooler_output.view(1, -1, out.pooler_output.shape[-1])
 
 
 class Qwen3_5(nn.Module):

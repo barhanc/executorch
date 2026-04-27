@@ -9,15 +9,19 @@ from argparse import ArgumentParser
 
 import torch
 from executorch.backends.xnnpack.partition.xnnpack_partitioner import XnnpackPartitioner
-from executorch.backends.xnnpack.quantizer.xnnpack_quantizer import (
-    get_symmetric_quantization_config,
-    XNNPACKQuantizer,
+from executorch.extension.llm.export.quantizer_lib import (
+    get_pt2e_quantizers,
+    PT2EQuantOptions,
+    DynamicQuantLinearOptions,
 )
 from executorch.examples.models.llama.source_transformation.custom_kv_cache import (
     replace_kv_cache_with_custom_kv_cache,
 )
 from executorch.examples.models.llama.source_transformation.sdpa import (
     replace_sdpa_with_custom_op,
+)
+from executorch.examples.models.llama.source_transformation.quantize import (
+    get_quant_weight_transform,
 )
 from model import Qwen3_5MultimodalModel, SimpleVisionWrapper
 from executorch.exir import (
@@ -68,14 +72,25 @@ def export_text_model(qwen, quantize=False):
         example_inputs=(example_embeddings, example_input_pos),
     )
     
+    if quantize:
+        logging.info("Applying 8da4w weight transform...")
+        quant_transform = get_quant_weight_transform(
+            quantization_mode="8da4w",
+            group_size=128,
+            computation_dtype=DType.fp32,
+        )
+        source_transforms.append(quant_transform)
+    
     manager = text_model_em.source_transform(source_transforms).export()
     
     if quantize:
-        logging.info("Quantizing text_decoder...")
-        quantizer = XNNPACKQuantizer()
-        quantizer.set_global(get_symmetric_quantization_config())
-        manager = manager.pt2e_quantize([quantizer])
-
+        logging.info("Quantizing text_decoder with get_pt2e_quantizers...")
+        quant_options = PT2EQuantOptions(
+            quantize_linear=DynamicQuantLinearOptions(is_per_channel=True)
+        )
+        quantizers = get_pt2e_quantizers(quant_options)
+        manager = manager.pt2e_quantize(quantizers)
+        
     return manager.export_program
 
 def export_image_encoder(qwen, quantize=False):
@@ -117,7 +132,8 @@ def export_all(qwen_model: Qwen3_5MultimodalModel, quantize=False):
     qwen = qwen_model.get_eager_model()
 
     logging.info("Exporting vision_encoder...")
-    image_encoder_ep = export_image_encoder(qwen, quantize=quantize)
+    # Quantization only applied to text model, vision encoder remains FP32
+    image_encoder_ep = export_image_encoder(qwen, quantize=False)
 
     logging.info("Exporting text_decoder...")
     text_model_ep = export_text_model(qwen, quantize=quantize)
